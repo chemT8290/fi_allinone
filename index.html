@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -1020,89 +1019,201 @@ const TICKER_DB = [
 
 let tickerSearchTimer = null;
 
+
+function buildApiUrl(base, params={}) {
+  const url = (base || '').trim();
+  if (!url) throw new Error('Apps Script URL이 비어 있습니다.');
+  const qs = Object.entries(params)
+    .filter(([,v]) => v !== undefined && v !== null && v !== '')
+    .map(([k,v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+    .join('&');
+  if (!qs) return url;
+  return url + (url.includes('?') ? '&' : '?') + qs;
+}
+
+function normalizeTickerSearchText(v) {
+  return String(v || '').toLowerCase().replace(/\s/g, '').replace(/[^0-9a-z가-힣:._-]/g, '');
+}
+
+function getTickerParts(t) {
+  const raw = String(t || '').trim();
+  const parts = raw.split(':');
+  const exch = parts.length > 1 ? parts[0] : '';
+  const code = parts.length > 1 ? parts.slice(1).join(':') : raw;
+  return { exch, code };
+}
+
+function findExactTickerResult(results, q) {
+  const kw = normalizeTickerSearchText(q);
+  if (!kw) return null;
+  return (results || []).find(t => {
+    const ticker = String(t.ticker || '');
+    const { code } = getTickerParts(ticker);
+    const name = normalizeTickerSearchText(t.name || '');
+    const full = normalizeTickerSearchText(ticker);
+    const pureCode = normalizeTickerSearchText(code);
+    const aliases = normalizeTickerSearchText(t.aliases || '');
+    return name === kw || full === kw || pureCode === kw || aliases === kw;
+  }) || null;
+}
+
 function tickerSearch(q) {
   clearTimeout(tickerSearchTimer);
   const dd = document.getElementById('ticker-dropdown');
-  if (!q || q.length < 1) { dd.style.display = 'none'; return; }
+  const st = document.getElementById('m-search-status');
+  const tickerInput = document.getElementById('m-ticker');
+  const curInput = document.getElementById('m-cur');
 
-  // 로컬 DB로 즉시 결과 표시 (가격 없이)
-  const kw = q.toLowerCase().replace(/\s/g,'');
-  const localResults = TICKER_DB.filter(t =>
-    t.name.toLowerCase().replace(/\s/g,'').includes(kw) ||
-    t.ticker.toLowerCase().replace(/krx:|nasdaq:|nyse:/g,'').includes(kw)
-  ).slice(0, 8);
+  if (!q || q.trim().length < 1) {
+    dd.style.display = 'none';
+    if (st) st.textContent = '';
+    return;
+  }
 
-  renderDropdown(dd, localResults, false);
+  // 사용자가 종목명을 다시 수정하면 이전 자동입력값은 혼동 방지를 위해 비운다.
+  if (tickerInput && document.activeElement === document.getElementById('m-name')) {
+    tickerInput.value = '';
+    document.getElementById('m-exchange').value = '';
+    curInput.value = '';
+    document.getElementById('m-daily').value = '';
+    const hint = document.getElementById('m-cur-hint');
+    if (hint) hint.textContent = '';
+  }
 
-  // Apps Script URL이 있으면 가격 포함 버전으로 업데이트
+  // 1차: 브라우저 내장 DB로 즉시 후보 표시
+  const kw = normalizeTickerSearchText(q);
+  const localResults = TICKER_DB.filter(t => {
+    const ticker = String(t.ticker || '');
+    const { code } = getTickerParts(ticker);
+    return normalizeTickerSearchText(t.name).includes(kw) ||
+           normalizeTickerSearchText(ticker).includes(kw) ||
+           normalizeTickerSearchText(code).includes(kw);
+  }).slice(0, 8);
+
+  if (localResults.length) renderDropdown(dd, localResults, false);
+  else {
+    dd.innerHTML = `<div style="padding:10px 14px;font-size:12px;color:var(--text3)">검색 중...</div>`;
+    dd.style.display = 'block';
+  }
+
+  // 2차: Apps Script가 tickerMaster / 내장 DB / Yahoo Finance에서 종목명→코드 검색
   tickerSearchTimer = setTimeout(async () => {
-    if (!gfApiUrl) return; // URL 없으면 로컬 결과만 표시
+    if (!gfApiUrl) {
+      if (st) {
+        st.textContent = 'Apps Script URL 필요';
+        st.style.color = 'var(--amber)';
+      }
+      return;
+    }
 
-    const st = document.getElementById('m-search-status');
-    st.textContent = '💹 가격 조회 중...';
+    if (st) {
+      st.textContent = '🔎 종목 검색 중...';
+      st.style.color = 'var(--accent)';
+    }
+
     try {
-      const url = `${gfApiUrl.trim()}&action=search&q=${encodeURIComponent(q)}`;
+      const url = buildApiUrl(gfApiUrl, { action: 'search', q });
       const data = await fetchViaJSONP(url);
-      if (data.ok && data.results && data.results.length > 0) {
-        renderDropdown(dd, data.results, true);
-        st.textContent = '';
+
+      if (data.ok && Array.isArray(data.results) && data.results.length > 0) {
+        renderDropdown(dd, data.results, false);
+        if (st) {
+          st.textContent = '검색 결과를 선택하면 코드와 현재가가 자동 입력됩니다';
+          st.style.color = 'var(--text3)';
+        }
+
+        // 정확히 일치하는 종목명/티커를 입력한 경우 자동으로 첫 결과 선택 후 현재가 조회
+        const exact = findExactTickerResult(data.results, q);
+        if (exact && !tickerInput.value && document.activeElement === document.getElementById('m-name')) {
+          const parts = getTickerParts(exact.ticker || '');
+          const exch = exact.exch || exact.exchange || parts.exch || 'KRX';
+          const cur = exact.currency || exact.cur || (exch === 'KRX' ? 'KRW' : 'USD');
+          const type = exact.type || 'stock';
+          setTimeout(() => {
+            selectTicker(exact.ticker, exact.name, exch, cur, type, exact.curPrice || 0, exact.dailyPct || 0);
+          }, 80);
+        }
       } else {
-        st.textContent = '';
+        if (localResults.length) {
+          if (st) {
+            st.textContent = '내장 후보를 선택하면 현재가를 조회합니다';
+            st.style.color = 'var(--text3)';
+          }
+        } else {
+          renderDropdown(dd, [], false);
+          if (st) {
+            st.textContent = '검색 결과 없음 — 티커를 직접 입력하거나 tickerMaster에 추가';
+            st.style.color = 'var(--amber)';
+          }
+        }
       }
     } catch(e) {
-      st.textContent = '';
-      // 로컬 결과 유지
+      console.warn('종목 검색 실패:', e);
+      if (st) {
+        st.textContent = localResults.length ? '내장 후보를 선택하세요' : '⚠ 종목 검색 실패';
+        st.style.color = 'var(--amber)';
+      }
     }
-  }, 400);
+  }, 450);
+}
+
+function escapeJsArg(v) {
+  return String(v ?? '')
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/\r?\n/g, ' ');
 }
 
 function renderDropdown(dd, results, hasPrices) {
   if (!results.length) {
-    dd.innerHTML = `<div style="padding:10px 14px;font-size:12px;color:var(--text3)">
-      검색 결과 없음 — 티커를 직접 입력하세요</div>`;
+    dd.innerHTML = `<div style="padding:10px 14px;font-size:12px;color:var(--text3);line-height:1.6">
+      검색 결과가 없습니다.<br>
+      <span style="font-size:11px">국내 종목은 Apps Script의 <b>tickerMaster</b> 시트에 종목명·티커를 추가하면 검색됩니다.</span>
+    </div>`;
     dd.style.display = 'block';
     return;
   }
 
   dd.innerHTML = results.map(t => {
-    // ticker 정규화: KRX:005930 → exch=KRX, code=005930
-    const parts = (t.ticker||'').split(':');
-    const exch = t.exch || (parts.length > 1 ? parts[0] : 'KRX');
-    const code = parts.length > 1 ? parts[1] : parts[0];
-    const cur  = t.currency || t.cur || 'KRW';
+    const parts = getTickerParts(t.ticker || '');
+    const exch = t.exch || t.exchange || parts.exch || (t.currency === 'USD' || t.cur === 'USD' ? 'NASDAQ' : 'KRX');
+    const code = parts.code || t.ticker || '';
+    const cur  = t.currency || t.cur || (exch === 'KRX' ? 'KRW' : 'USD');
     const type = t.type || 'stock';
     const flag = cur === 'KRW' ? '🇰🇷' : '🇺🇸';
     const c    = type === 'etf' ? TC.etf : TC.stock;
+    const source = t.source ? `<span style="margin-left:5px;color:var(--text3)">${t.source}</span>` : '';
 
-    // 가격 표시
     let priceHtml = '';
-    if (hasPrices && t.curPrice > 0) {
-      const up = t.dailyPct >= 0;
+    if (hasPrices && Number(t.curPrice) > 0) {
+      const up = (Number(t.dailyPct) || 0) >= 0;
       const priceStr = cur === 'KRW'
-        ? Math.round(t.curPrice).toLocaleString() + '원'
-        : '$' + t.curPrice.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
-      const pctStr = (up ? '+' : '') + (t.dailyPct||0).toFixed(2) + '%';
+        ? Math.round(Number(t.curPrice)).toLocaleString() + '원'
+        : '$' + Number(t.curPrice).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+      const pctStr = (up ? '+' : '') + (Number(t.dailyPct)||0).toFixed(2) + '%';
       priceHtml = `<div style="text-align:right;min-width:90px">
         <div style="font-size:12px;font-weight:600;color:var(--text1)">${priceStr}</div>
         <div style="font-size:10px;font-weight:600;color:${up?'var(--green)':'var(--red)'}">${pctStr}</div>
       </div>`;
-    } else if (!hasPrices && gfApiUrl) {
-      priceHtml = `<div style="font-size:10px;color:var(--text3);min-width:60px;text-align:right">조회 중...</div>`;
+    } else {
+      priceHtml = `<div style="font-size:10px;color:var(--text3);min-width:74px;text-align:right">선택 시 조회</div>`;
     }
 
-    // selectTicker에 넘길 값 이스케이프
-    const safeName = t.name.replace(/'/g, "\\'");
-    const safeTicker = t.ticker || code;
+    const safeName = escapeJsArg(t.name || code);
+    const safeTicker = escapeJsArg(t.ticker || code);
+    const safeExch = escapeJsArg(exch);
+    const safeCur = escapeJsArg(cur);
+    const safeType = escapeJsArg(type);
 
-    return `<div onclick="selectTicker('${safeTicker}','${safeName}','${exch}','${cur}','${type}',${t.curPrice||0},${t.dailyPct||0})"
+    return `<div onclick="selectTicker('${safeTicker}','${safeName}','${safeExch}','${safeCur}','${safeType}',${Number(t.curPrice)||0},${Number(t.dailyPct)||0})"
       style="display:flex;align-items:center;gap:10px;padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--border);transition:background .1s"
       onmouseover="this.style.background='var(--bg)'" onmouseout="this.style.background=''">
       <span style="font-size:16px">${flag}</span>
       <div style="flex:1;min-width:0">
-        <div style="font-size:12px;font-weight:600;color:var(--text1)">${t.name}</div>
+        <div style="font-size:12px;font-weight:600;color:var(--text1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${t.name || code}</div>
         <div style="font-size:10px;color:var(--text3);font-family:'Inter',sans-serif">
           ${code} · ${exch}
-          <span style="margin-left:5px;padding:1px 5px;border-radius:4px;background:${c}18;color:${c};font-weight:600">${TL[type]||type}</span>
+          <span style="margin-left:5px;padding:1px 5px;border-radius:4px;background:${c}18;color:${c};font-weight:600">${TL[type]||type}</span>${source}
         </div>
       </div>
       ${priceHtml}
@@ -1155,27 +1266,43 @@ function selectTicker(ticker, name, exch, currency, type, curPrice=0, dailyPct=0
   document.getElementById('m-cur').focus();
 }
 
-// CSV에서 특정 종목 현재가 찾기
+// Apps Script에서 특정 종목 현재가 찾기
 async function fetchCSVPrice(ticker, code, currency, st) {
   st.textContent = '💹 현재가 조회 중...';
   st.style.color = 'var(--accent)';
-  try {
-    const res = await fetch(`/api/quote?ticker=${encodeURIComponent(ticker)}`);
-    const data = await res.json();
 
-    if (data.ok && data.curPrice > 0) {
-      // 캐시에 저장
-      gfPriceMap[ticker] = { curPrice: data.curPrice, dailyPct: data.dailyPct || 0 };
-      gfPriceMap[code]   = { curPrice: data.curPrice, dailyPct: data.dailyPct || 0 };
-      if (data.spark?.length > 1) sparkCache[ticker] = data.spark;
-      setCurPriceField(data.curPrice, data.dailyPct || 0, currency, st);
-    } else {
-      st.textContent = '⚠ 가격 조회 실패 — 직접 입력해주세요';
-      st.style.color = 'var(--amber)';
-      document.getElementById('m-cur').focus();
+  try {
+    // 정적 배포/Vercel/GitHub Pages 어디서 열어도 동작하도록 /api/quote 대신 Apps Script JSONP 사용
+    const fullTicker = ticker.includes(':') ? ticker : toGFTicker(code, document.getElementById('m-exchange').value, currency);
+    const data = await fetchViaJSONP(buildApiUrl(gfApiUrl || GF_SCRIPT_URL, {
+      action: 'quote',
+      ticker: fullTicker
+    }));
+
+    if (data && data.ok && Number(data.curPrice) > 0) {
+      const curPrice = Number(data.curPrice);
+      const dailyPct = Number(data.dailyPct) || 0;
+
+      gfPriceMap[fullTicker] = { curPrice, dailyPct };
+      gfPriceMap[ticker]     = { curPrice, dailyPct };
+      gfPriceMap[code]       = { curPrice, dailyPct };
+      if (Array.isArray(data.spark) && data.spark.length > 1) sparkCache[fullTicker] = data.spark;
+
+      setCurPriceField(curPrice, dailyPct, currency, st);
+      return;
     }
+
+    // quote가 실패했더라도 전체 가격 CSV에 이미 있으면 한 번 더 확인
+    const cached = gfPriceMap[ticker] || gfPriceMap[code] || gfPriceMap[fullTicker];
+    if (cached && cached.curPrice > 0) {
+      setCurPriceField(cached.curPrice, cached.dailyPct || 0, currency, st);
+      return;
+    }
+
+    throw new Error(data?.error || '가격 데이터 없음');
   } catch(e) {
-    st.textContent = '⚠ 직접 입력해주세요';
+    console.warn('현재가 조회 실패:', e);
+    st.textContent = '⚠ 가격 조회 실패 — 직접 입력해주세요';
     st.style.color = 'var(--amber)';
     document.getElementById('m-cur').focus();
   }
@@ -1351,10 +1478,7 @@ function normalizeOtherAsset(o){
 }
 
 function getStateUrl(action){
-  const base = (STATE_SCRIPT_URL || '').trim();
-  if(!base) throw new Error('STATE_SCRIPT_URL이 비어 있습니다. Apps Script 웹앱 URL을 입력하세요.');
-  const sep = base.includes('?') ? '&' : '?';
-  return `${base}${sep}action=${encodeURIComponent(action)}`;
+  return buildApiUrl(STATE_SCRIPT_URL, { action });
 }
 
 async function saveData() {
@@ -2049,6 +2173,12 @@ function deleteHolding(){
 function confirmAdd(){
   const n=document.getElementById('m-name').value.trim();
   if(!n){alert('종목명을 입력해주세요');return;}
+  const tickerVal=document.getElementById('m-ticker').value.trim();
+  const curVal=+document.getElementById('m-cur').value||0;
+  if(!tickerVal || curVal<=0){
+    const ok=confirm('종목 코드 또는 현재가가 비어 있습니다. 검색 결과를 선택하면 자동 입력됩니다. 그래도 저장할까요?');
+    if(!ok) return;
+  }
   const isNew = !editingId;
   const obj={
     id:editingId||++pfIdCtr,name:n,
