@@ -340,13 +340,6 @@ table.smtbl{width:100%;border-collapse:collapse;font-size:11px}
           <option value="1800">30분</option>
         </select>
         <span id="gf-next-update" style="font-size:11px;color:var(--text3);white-space:nowrap"></span>
-        <div style="width:1px;height:20px;background:var(--border);margin:0 4px"></div>
-        <button onclick="exportJSON()"
-          style="padding:5px 11px;font-size:11px;border:1px solid var(--border2);border-radius:7px;background:transparent;color:var(--text2);cursor:pointer;white-space:nowrap;font-family:inherit"
-          title="현재 데이터를 JSON 파일로 다운로드">📤 내보내기</button>
-        <button onclick="importJSON()"
-          style="padding:5px 11px;font-size:11px;border:1px solid var(--border2);border-radius:7px;background:transparent;color:var(--text2);cursor:pointer;white-space:nowrap;font-family:inherit"
-          title="저장된 JSON 파일에서 불러오기">📥 가져오기</button>
       </div>
       <!-- 상태 표시 바 -->
       <div id="gf-status-bar" style="display:none;align-items:center;gap:8px;margin-top:8px;padding:7px 12px;border-radius:7px;border:1px solid;font-size:12px">
@@ -1163,43 +1156,26 @@ function selectTicker(ticker, name, exch, currency, type, curPrice=0, dailyPct=0
 
 // CSV에서 특정 종목 현재가 찾기
 async function fetchCSVPrice(ticker, code, currency, st) {
+  st.textContent = '💹 현재가 조회 중...';
+  st.style.color = 'var(--accent)';
   try {
-    // ── 1순위: Vercel /api/quote (서버에서 직접 조회, 종목설정 불필요) ──
-    const quoteRes = await fetch(`/api/quote?ticker=${encodeURIComponent(ticker)}`);
-    if (quoteRes.ok) {
-      const data = await quoteRes.json();
-      if (data.ok && data.curPrice > 0) {
-        // gfPriceMap에도 캐싱
-        gfPriceMap[ticker] = { curPrice: data.curPrice, dailyPct: data.dailyPct || 0 };
-        gfPriceMap[code]   = { curPrice: data.curPrice, dailyPct: data.dailyPct || 0 };
-        setCurPriceField(data.curPrice, data.dailyPct || 0, currency, st);
-        return;
-      }
-      // needsSync: 종목이 시트에 없음 → 추가 후 자동 반영 안내
-      if (data.needsSync) {
-        st.textContent = '💡 종목 저장 시 자동으로 가격 연동됩니다';
-        st.style.color = 'var(--accent)';
-        document.getElementById('m-cur').focus();
-        return;
-      }
+    const res = await fetch(`/api/quote?ticker=${encodeURIComponent(ticker)}`);
+    const data = await res.json();
+
+    if (data.ok && data.curPrice > 0) {
+      // 캐시에 저장
+      gfPriceMap[ticker] = { curPrice: data.curPrice, dailyPct: data.dailyPct || 0 };
+      gfPriceMap[code]   = { curPrice: data.curPrice, dailyPct: data.dailyPct || 0 };
+      if (data.spark?.length > 1) sparkCache[ticker] = data.spark;
+      setCurPriceField(data.curPrice, data.dailyPct || 0, currency, st);
+    } else {
+      st.textContent = '⚠ 가격 조회 실패 — 직접 입력해주세요';
+      st.style.color = 'var(--amber)';
+      document.getElementById('m-cur').focus();
     }
-
-    // ── 2순위: 기존 CSV gfPriceMap 캐시에서 재확인 ──
-    const cached = gfPriceMap[ticker] || gfPriceMap[code];
-    if (cached && cached.curPrice > 0) {
-      setCurPriceField(cached.curPrice, cached.dailyPct, currency, st);
-      return;
-    }
-
-    // ── 3순위: /api/quote 없는 환경 (로컬) → 안내만 표시 ──
-    st.textContent = '💡 저장 후 가격이 자동 갱신됩니다';
-    st.style.color = 'var(--accent)';
-    document.getElementById('m-cur').focus();
-
   } catch(e) {
-    // /api/quote 엔드포인트 없음 (로컬 파일 실행 등)
-    st.textContent = '💡 현재가 직접 입력 후 저장하세요';
-    st.style.color = 'var(--text3)';
+    st.textContent = '⚠ 직접 입력해주세요';
+    st.style.color = 'var(--amber)';
     document.getElementById('m-cur').focus();
   }
 }
@@ -1463,39 +1439,6 @@ function loadFromLocalStorage() {
 }
 
 // 수동 내보내기 (JSON 파일 다운로드)
-function exportJSON(){
-  const data = { holdings, otherAssets, exportedAt: new Date().toISOString() };
-  const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'});
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `fi_portfolio_${new Date().toISOString().slice(0,10)}.json`;
-  a.click();
-  showToast('📤 JSON 파일 저장됨');
-}
-
-// 수동 가져오기 (JSON 파일 업로드)
-function importJSON(){
-  const input = document.createElement('input');
-  input.type='file'; input.accept='.json';
-  input.onchange = e => {
-    const file = e.target.files[0];
-    if(!file) return;
-    const reader = new FileReader();
-    reader.onload = ev => {
-      try {
-        const data = JSON.parse(ev.target.result);
-        if(data.holdings)    { holdings    = data.holdings;    pfIdCtr    = Math.max(pfIdCtr,    ...holdings.map(h=>h.id||0)); }
-        if(data.otherAssets) { otherAssets = data.otherAssets; otherIdCtr = Math.max(otherIdCtr, ...otherAssets.map(o=>o.id||0)); }
-        saveData();
-        renderPfAll();
-        showToast(`✅ 가져오기 완료 — 주식 ${holdings.length}개, 자산 ${otherAssets.length}개`);
-      } catch(err){ showToast('⚠ 파일 형식 오류', 'warn'); }
-    };
-    reader.readAsText(file);
-  };
-  input.click();
-}
-
 // ── 토스트 메시지 ──
 function showToast(msg, type='info'){
   let el = document.getElementById('_toast');
