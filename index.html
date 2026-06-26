@@ -818,7 +818,7 @@ const gfPriceMap={};  // { 'KRX:005930': {curPrice:78500, dailyPct:1.2} }
 // ── Google Finance 연동 URL ──
 const GF_SHEET_ID  = '1gDxo6kKqnG3RdFkqEz9pDMDW5ZuMujSmuLRP7VHQ-BA';
 const GF_SHEET_URL = `https://docs.google.com/spreadsheets/d/${GF_SHEET_ID}/export?format=csv&gid=996077164`;
-const GF_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbzkPHI9Nl0483BsphycJ1OKKCd8TSrEFm-YV6r1mdkvoLh5DmUBxI7Aj9xPVlypGTlMqg/exec';
+const GF_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwuviwOgt69vLD4X6vq7RGRvYCZDbjC3XvlJDxOuqMofmnKDW-oNa5Wq8S64f8tpeDW3g/exec';
 let gfApiUrl = GF_SCRIPT_URL;
 let gfLastFetch = null;
 
@@ -1500,7 +1500,7 @@ async function saveData() {
       body: JSON.stringify(payload)
     });
 
-    showToast('💾 Google Sheets 저장 요청 완료');
+    showToast('💾 Google Sheets 저장 요청 완료 · tickerMaster 자동 반영');
   } catch(e) {
     console.error('Google Sheets 저장 실패:', e);
     showToast('⚠ Google Sheets 저장 실패 — Apps Script URL/배포 권한 확인', 'warn');
