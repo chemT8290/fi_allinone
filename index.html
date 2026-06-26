@@ -1302,7 +1302,8 @@ async function fetchCSVPrice(ticker, code, currency, st) {
     throw new Error(data?.error || '가격 데이터 없음');
   } catch(e) {
     console.warn('현재가 조회 실패:', e);
-    st.textContent = '⚠ 가격 조회 실패 — 직접 입력해주세요';
+    const msg = e && e.message ? e.message : String(e || '알 수 없는 오류');
+    st.textContent = '⚠ 가격 조회 실패 — ' + msg.replace(/^Error:\s*/, '').slice(0, 70);
     st.style.color = 'var(--amber)';
     document.getElementById('m-cur').focus();
   }
@@ -1422,7 +1423,7 @@ function fetchViaJSONP(url){
     const old = document.getElementById('_gfjsonp');
     if(old) old.remove();
     const cbName = '__gfcb_'+Date.now();
-    const timer = setTimeout(()=>{ delete window[cbName]; reject(new Error('타임아웃(8초)')); }, 8000);
+    const timer = setTimeout(()=>{ delete window[cbName]; reject(new Error('타임아웃(20초)')); }, 20000);
     window[cbName] = (data) => {
       clearTimeout(timer);
       delete window[cbName];
