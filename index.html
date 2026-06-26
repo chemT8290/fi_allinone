@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -1312,131 +1313,119 @@ function fetchViaJSONP(url){
 
 // ══════════════════════════════════════════════
 // ── 데이터 저장 / 불러오기 ──
-// Vercel 환경: /api/save, /api/load 사용 (어디서 접속해도 동기화)
-// 로컬 환경:   localStorage 폴백
+// Google Sheets를 단일 저장소로 사용
+// localStorage 사용 안 함: 새 기기/새 브라우저에서도 Sheets 데이터 기준으로 누적 표시
 // ══════════════════════════════════════════════
-const LS_KEY_HOLDINGS = 'fi_holdings_v1';
-const LS_KEY_OTHER    = 'fi_other_v1';
+// 입력값 저장용 Apps Script Web App URL.
+// 가격 조회용 GF_SCRIPT_URL과 같은 Apps Script에 saveState/loadState 기능을 넣었다면 그대로 사용 가능.
+// 별도 Apps Script를 쓴다면 아래 값을 해당 웹앱 URL로 교체하세요.
+const STATE_SCRIPT_URL = GF_SCRIPT_URL;
 
-// Vercel API 환경인지 감지
-const IS_VERCEL = window.location.hostname !== 'localhost'
-               && window.location.protocol === 'https:'
-               && !window.location.hostname.includes('127.0.0.1')
-               && !window.location.hostname.includes('file:');
+function normalizeHolding(h){
+  return {
+    id:       Number(h.id) || ++pfIdCtr,
+    name:     h.name || '',
+    ticker:   h.ticker || '',
+    exchange: h.exchange || '',
+    type:     h.type || 'stock',
+    currency: h.currency || 'KRW',
+    shares:   Number(h.shares) || 0,
+    avgPrice: Number(h.avgPrice) || 0,
+    curPrice: Number(h.curPrice) || 0,
+    dailyPct: Number(h.dailyPct) || 0,
+    sector:   h.sector || ''
+  };
+}
 
-const API_BASE = IS_VERCEL ? '' : ''; // 같은 도메인 /api/...
+function normalizeOtherAsset(o){
+  return {
+    id:   Number(o.id) || ++otherIdCtr,
+    name: o.name || '',
+    type: o.type || 'deposit',
+    cost: Number(o.cost) || 0,
+    cur:  Number(o.cur) || 0,
+    rate: Number(o.rate) || 0,
+    due:  o.due || '',
+    memo: o.memo || ''
+  };
+}
+
+function getStateUrl(action){
+  const base = (STATE_SCRIPT_URL || '').trim();
+  if(!base) throw new Error('STATE_SCRIPT_URL이 비어 있습니다. Apps Script 웹앱 URL을 입력하세요.');
+  const sep = base.includes('?') ? '&' : '?';
+  return `${base}${sep}action=${encodeURIComponent(action)}`;
+}
 
 async function saveData() {
-  // ① 항상 localStorage에 저장 (빠른 복원용)
   try {
-    localStorage.setItem(LS_KEY_HOLDINGS, JSON.stringify(holdings));
-    localStorage.setItem(LS_KEY_OTHER,    JSON.stringify(otherAssets));
-  } catch(e) {}
+    const payload = {
+      action: 'saveState',
+      holdings: holdings.map(normalizeHolding),
+      otherAssets: otherAssets.map(normalizeOtherAsset),
+      savedAt: new Date().toISOString()
+    };
 
-  // ② Vercel API로 Sheets에 저장
-  try {
-    const res = await fetch('/api/save', {
+    // Apps Script는 응답 CORS 처리가 까다로우므로 no-cors로 저장 요청을 보냄.
+    // 저장 성공 여부를 브라우저가 직접 읽지는 못하지만, 서버에는 요청이 전달됨.
+    await fetch(getStateUrl('saveState'), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        action: 'save_all',
-        holdings,
-        otherAssets,
-      }),
+      mode: 'no-cors',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify(payload)
     });
-    if (res.ok) {
-      showToast('💾 저장 완료 (Google Sheets 동기화)');
-    } else {
-      throw new Error('API 오류');
-    }
+
+    showToast('💾 Google Sheets 저장 요청 완료');
   } catch(e) {
-    // Vercel API 없는 환경 → localStorage만 사용
-    showToast('💾 저장 완료 (로컬)');
+    console.error('Google Sheets 저장 실패:', e);
+    showToast('⚠ Google Sheets 저장 실패 — Apps Script URL/배포 권한 확인', 'warn');
   }
 }
 
-// saveLocal은 saveData의 별칭 (기존 코드 호환)
+// 기존 코드 호환: 추가·수정·삭제 함수에서 saveLocal()을 호출해도 Google Sheets에 저장됨
 function saveLocal() { saveData(); }
 
 async function loadData() {
-  // ① 먼저 localStorage에서 빠르게 복원 (초기 렌더링용)
-  loadFromLocalStorage();
-
-  // ② Vercel API에서 최신 데이터 덮어쓰기
   try {
-    const res = await fetch('/api/load');
-    if (!res.ok) throw new Error('API 오류');
-    const data = await res.json();
-    if (!data.ok) throw new Error(data.error || '불러오기 실패');
+    const data = await fetchViaJSONP(getStateUrl('loadState'));
+    if (!data || data.ok === false) throw new Error(data?.error || '불러오기 실패');
 
-    let changed = false;
+    // 빈 배열도 정상 상태로 반영해야 삭제 결과가 유지됨
+    holdings = Array.isArray(data.holdings) ? data.holdings.map(normalizeHolding) : [];
+    otherAssets = Array.isArray(data.otherAssets) ? data.otherAssets.map(normalizeOtherAsset) : [];
 
-    if (data.holdings && data.holdings.length > 0) {
-      holdings = data.holdings;
-      pfIdCtr = Math.max(pfIdCtr, ...holdings.map(h => h.id || 0));
-      changed = true;
-    }
-    if (data.otherAssets && data.otherAssets.length > 0) {
-      otherAssets = data.otherAssets;
-      otherIdCtr = Math.max(otherIdCtr, ...otherAssets.map(o => o.id || 0));
-      changed = true;
-    }
-    // 가격 데이터도 반영
-    if (data.priceData && data.priceData.length > 0) {
+    pfIdCtr = Math.max(20, ...holdings.map(h => Number(h.id) || 0));
+    otherIdCtr = Math.max(200, ...otherAssets.map(o => Number(o.id) || 0));
+
+    // Apps Script가 가격 데이터까지 같이 내려주는 경우 반영
+    if (Array.isArray(data.priceData)) {
       data.priceData.forEach(item => {
         if (!item.ticker) return;
-        if (item.curPrice > 0) {
-          gfPriceMap[item.ticker] = { curPrice: item.curPrice, dailyPct: item.dailyPct || 0 };
+        if (Number(item.curPrice) > 0) {
+          gfPriceMap[item.ticker] = {
+            curPrice: Number(item.curPrice) || 0,
+            dailyPct: Number(item.dailyPct) || 0
+          };
           const code = item.ticker.includes(':') ? item.ticker.split(':').pop() : item.ticker;
-          gfPriceMap[code] = { curPrice: item.curPrice, dailyPct: item.dailyPct || 0 };
+          gfPriceMap[code] = gfPriceMap[item.ticker];
         }
-        if (item.spark?.length > 1) sparkCache[item.ticker] = item.spark;
-        const code = item.ticker.includes(':') ? item.ticker.split(':').pop() : item.ticker;
-        const h = holdings.find(h => h.ticker === item.ticker || h.ticker === code);
-        if (h) {
-          if (item.curPrice > 0) h.curPrice = item.curPrice;
-          if (item.dailyPct)     h.dailyPct = item.dailyPct;
-        }
+        if (item.spark?.length > 1) sparkCache[item.ticker] = item.spark.map(Number).filter(v => !Number.isNaN(v));
       });
     }
 
-    if (changed) {
-      // localStorage도 최신으로 갱신
-      localStorage.setItem(LS_KEY_HOLDINGS, JSON.stringify(holdings));
-      localStorage.setItem(LS_KEY_OTHER,    JSON.stringify(otherAssets));
-      renderPfAll();
-      showToast(`✅ 불러오기 완료 — 주식 ${holdings.length}개, 자산 ${otherAssets.length}개`);
-    }
-
+    renderPfAll();
+    document.getElementById('last-upd').textContent =
+      new Date().toLocaleString('ko-KR',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
+    showToast(`✅ Google Sheets 불러오기 완료 — 주식 ${holdings.length}개, 자산 ${otherAssets.length}개`);
   } catch(e) {
-    // /api/load 없는 환경 (로컬 파일 등) → localStorage만 사용
-    console.log('API 불러오기 생략 (로컬 환경):', e.message);
-    if (holdings.length || otherAssets.length) {
-      showToast(`📂 로컬 복원 — 주식 ${holdings.length}개, 자산 ${otherAssets.length}개`);
-    }
+    console.error('Google Sheets 불러오기 실패:', e);
+    renderPfAll();
+    showToast('⚠ Google Sheets 불러오기 실패 — 빈 화면으로 시작', 'warn');
   }
 }
 
-function loadFromLocalStorage() {
-  try {
-    const h = localStorage.getItem(LS_KEY_HOLDINGS);
-    const o = localStorage.getItem(LS_KEY_OTHER);
-    if (h) {
-      const parsed = JSON.parse(h);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        holdings = parsed;
-        pfIdCtr = Math.max(pfIdCtr, ...holdings.map(h => h.id || 0));
-      }
-    }
-    if (o) {
-      const parsed = JSON.parse(o);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        otherAssets = parsed;
-        otherIdCtr = Math.max(otherIdCtr, ...otherAssets.map(o => o.id || 0));
-      }
-    }
-  } catch(e) {}
-}
+// localStorage를 사용하지 않도록 빈 호환 함수만 유지
+function loadFromLocalStorage() {}
 
 // 수동 내보내기 (JSON 파일 다운로드)
 // ── 토스트 메시지 ──
@@ -1501,7 +1490,7 @@ function setGfStatus(state, cnt=0, time=null, log=[]){
 
 function saveGfUrl(){
   gfApiUrl = document.getElementById('gf-url-input').value.trim();
-  localStorage.setItem('gf_api_url', gfApiUrl);
+  // API URL은 코드 상단 GF_SCRIPT_URL/STATE_SCRIPT_URL에서 관리합니다.
   fetchGF();
 }
 
@@ -2398,13 +2387,12 @@ document.getElementById('last-upd').textContent=new Date().toLocaleString('ko-KR
 loadSavedUrl();
 sRenderAssets(); sRenderEvents();
 
-// ① localStorage에서 즉시 복원 → 화면 렌더링
-loadFromLocalStorage();
+// Google Sheets에서 입력값을 불러온 뒤 화면 렌더링
 renderPfAll();
 
-// ② Vercel API에서 최신 데이터 + GF 가격 갱신
 setTimeout(async () => {
-  await loadData();
+  await loadData();      // 입력값: Google Sheets 기준
+  await fetchGF();       // 가격: Google Finance/가격데이터 시트 기준
   setAutoRefresh();
 }, 500);
 
